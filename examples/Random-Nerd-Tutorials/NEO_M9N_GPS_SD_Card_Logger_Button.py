@@ -19,7 +19,7 @@ CS_PIN = 17
 # microSD card filesystem mount path
 SD_MOUNT_PATH = '/sd'
 # file path to save data
-FILE_PATH = '/sd/data.txt'
+FILE_PATH = '/sd/data.csv'
 
         # L
 # Init SPI communication for the microSD card

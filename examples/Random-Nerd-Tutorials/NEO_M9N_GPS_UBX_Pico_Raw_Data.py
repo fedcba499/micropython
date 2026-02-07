@@ -2,95 +2,64 @@ from machine import UART
 import struct
 import time
 
-uart = UART(1, baudrate=115200, tx=4, rx=5)
+# Initialize UART1 (pins depend on your board, e.g., ESP32/Pico)
+uart = UART(1, baudrate=115200, tx=4, rx=5) 
 
-SYNC1 = 0xB5
-SYNC2 = 0x62
-
-
-def read_exact(n, timeout=200):
-    """Read exactly n bytes or return None"""
-    buf = b""
-    t0 = time.ticks_ms()
-
-    while len(buf) < n:
-
-        if uart.any():
-            data = uart.read(n - len(buf))
-            if data:
-                buf += data
-
-        if time.ticks_diff(time.ticks_ms(), t0) > timeout:
-            return None
-
-    return buf
-
-
-def read_ubx():
-
-    while True:
-
-        b = read_exact(1)
-        if not b:
-            return None
-
-        if b[0] != SYNC1:
-            continue
-
-        b = read_exact(1)
-        if not b or b[0] != SYNC2:
-            continue
-
-        cls = read_exact(1)
-        mid = read_exact(1)
-
-        if not cls or not mid:
-            return None
-
-        length_bytes = read_exact(2)
-        if not length_bytes:
-            return None
-
-        length = struct.unpack('<H', length_bytes)[0]
-
-        payload = read_exact(length)
-        if not payload:
-            return None
-
-        checksum = read_exact(2)
-        if not checksum:
-            return None
-
-        return cls[0], mid[0], payload
-
-
-def get_int32_le(buf, offset):
-    return struct.unpack_from('<i', buf, offset)[0]
-
+def get_ubx_pvt():
+    # 1. Look for UBX Sync Chars (0xB5 0x62)
+    if uart.any() >= 100:
+        if uart.read(1) == b'\xb5':
+            if uart.read(1) == b'\x62':
+                # 2. Read Class (0x01), ID (0x07), and Length (0x5C 0x00 = 92)
+                header = uart.read(4)
+                if header[:2] == b'\x01\x07':
+                    # 3. Read the 92-byte payload + 2-byte checksum
+                    payload = uart.read(92)
+                    checksum = uart.read(2)
+                    
+                    # 4. Parse specific offsets using struct.unpack
+                    # < = Little Endian
+                    # i = int32 (4 bytes), I = uint32 (4 bytes)
+                    # Offsets below are relative to the start of the 92-byte payload
+                    
+                    # Longitude: Offset 24, Latitude: Offset 28
+                    lon_raw = struct.unpack("<i", payload[24:28])[0]
+                    lat_raw = struct.unpack("<i", payload[28:32])[0]
+                    
+                    # Horizontal Accuracy (hAcc): Offset 40
+                    hacc_raw = struct.unpack("<I", payload[40:44])[0]
+                    
+                    # 5. Check Fix Status (Offset 21, bit 0)
+                    flags = payload[21]
+                    gnss_fix_ok = flags & 0x01
+                    
+                    if gnss_fix_ok:
+                        lat = lat_raw / 1e7
+                        lon = lon_raw / 1e7
+                        hacc_m = hacc_raw / 1000.0 # Convert mm to meters
+                        
+                        return lat, lon, hacc_m
+    return None
 
 while True:
+    # Clear the buffer
+    # Read everything currently in the 'waiting room and throw it away
+    if uart.any() > 0:
+        uart.read()
 
-    msg = read_ubx()
+    # Wait for a fresh message
+    # Since we just cleared the buffer, we have to wait a tiny bit
+    # for a brand new, current message to arrive from the GPS.
+    # At 10Hz, a new message arrives every 100ms.
 
-    if not msg:
-        continue
+    pos = None
+    timeout = 200 # ms
+    start = time.ticks_ms()
 
-    cls, mid, payload = msg
+    while pos is None and time.ticks_diff(time.ticks_ms(), start) < timeout:
+        pos = get_ubx_pvt()
 
-    # NAV-PVT
-    if cls == 0x01 and mid == 0x07:
-
-        # Safety check
-        if len(payload) != 92:
-            continue
-
-        lon = get_int32_le(payload, 24) / 1e7
-        lat = get_int32_le(payload, 28) / 1e7
-        alt = get_int32_le(payload, 36) / 1000
-
-        print("Lat:", lat)
-        print("Lon:", lon)
-        print("Alt:", alt, "m")
-        print("----------------")
-
-        time.sleep(1)
+    if pos:
+        print("Lat: {:.7f}, Lon: {:.7f}, Accuracy: {:.2f}m".format(*pos))
+        
+    time.sleep(0.1)
